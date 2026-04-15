@@ -26,10 +26,11 @@ import pandas as pd
 from fraud_platform.pipeline import (
     UGX_PER_USD_DEMO,
     anomaly_score_normalized,
+    apply_analyst_feedback,
     evaluate_model,
     load_data,
+    monitor_transaction_realtime,
     preprocess_data,
-    predict_transaction,
     risk_score,
     split_train_test,
     train_model,
@@ -105,6 +106,22 @@ def print_transaction_result(result: dict) -> None:
         )
     print(f"Risk score (0-100): {result['risk_score']:.2f}")
     print(f"Decision: {result['decision']} (source: {result['decision_source']})")
+    print(
+        "Context signals: "
+        f"graph={result.get('graph_risk_score', 0.0):.3f}, "
+        f"nlp={result.get('nlp_risk_score', 0.0):.3f}, "
+        f"behavior={result.get('behavior_risk_score', 0.0):.3f}"
+    )
+    print(
+        "Enterprise action: "
+        f"{result.get('enterprise_action', 'allow_transaction')} "
+        f"(priority={result.get('review_priority', 'P4')}, "
+        f"analyst_review={result.get('analyst_review_required', False)})"
+    )
+    if result.get("case_id"):
+        print(f"Case ID: {result['case_id']}")
+    if result.get("real_time_monitoring"):
+        print(f"Processing latency: {result.get('processing_latency_ms', 0.0):.3f} ms")
     if result.get("reason_codes"):
         print(f"Reason codes: {', '.join(result['reason_codes'])}")
     for line in result["alerts"]:
@@ -130,6 +147,8 @@ def demo_transaction(
                 "transaction_type": "Wire",
                 "previous_fraud_history": 1,
             },
+            "Urgent transfer. Change bank details and do not call.",
+            {"typing_cadence_z": 3.0, "mouse_velocity_z": 2.2, "session_deviation_z": 2.8},
         ),
         (
             "Clean small card payment (expect approve)",
@@ -141,6 +160,8 @@ def demo_transaction(
                 "transaction_type": "Card",
                 "previous_fraud_history": 0,
             },
+            "",
+            {"typing_cadence_z": 0.4, "mouse_velocity_z": 0.5, "session_deviation_z": 0.4},
         ),
         (
             "Policy step-up: new account + moderate amount (expect review, not instant decline)",
@@ -152,18 +173,23 @@ def demo_transaction(
                 "transaction_type": "ACH",
                 "previous_fraud_history": 0,
             },
+            "Invoice payment",
+            {"typing_cadence_z": 1.2, "mouse_velocity_z": 1.0, "session_deviation_z": 1.1},
         ),
     ]
-    for title, tx in scenarios:
+    for title, tx, instruction_text, behavior_profile in scenarios:
         print(f"\n=== Demo: {title} ===")
         print(f"Transaction: {tx}")
-        result = predict_transaction(
+        result = monitor_transaction_realtime(
             primary_model,
             tx,
             feature_columns,
             anomaly_detector=anomaly_detector,
             anomaly_calib=anomaly_calib,
             routing_thresholds=routing_thresholds,
+            recent_transactions=None,
+            payment_instruction_text=instruction_text,
+            behavior_profile=behavior_profile,
         )
         print("--- Result ---")
         print_transaction_result(result)
@@ -196,13 +222,20 @@ def interactive_demo(
         print("Invalid input; skipping interactive demo.")
         return
 
-    result = predict_transaction(
+    result = monitor_transaction_realtime(
         primary_model,
         tx,
         feature_columns,
         anomaly_detector=anomaly_detector,
         anomaly_calib=anomaly_calib,
         routing_thresholds=routing_thresholds,
+        recent_transactions=None,
+        payment_instruction_text=prompt_str("payment_instruction_text (optional): "),
+        behavior_profile={
+            "typing_cadence_z": prompt_float("typing_cadence_z (0-5, optional baseline deviation): "),
+            "mouse_velocity_z": prompt_float("mouse_velocity_z (0-5): "),
+            "session_deviation_z": prompt_float("session_deviation_z (0-5): "),
+        },
     )
     print("\n--- Result ---")
     print_transaction_result(result)
@@ -233,6 +266,9 @@ def main() -> int:
         "Routing thresholds (cost-tuned): "
         f"review>={routing_thresholds['review_probability']:.3f}, "
         f"decline>={routing_thresholds['decline_probability']:.3f}"
+    )
+    routing_thresholds = apply_analyst_feedback(
+        routing_thresholds, false_positive=False, missed_fraud=False
     )
 
     # 4) Evaluate both (assignment asks for metrics + explanation)

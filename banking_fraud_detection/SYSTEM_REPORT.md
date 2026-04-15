@@ -317,6 +317,72 @@ Streamlit:
 - `streamlit run app.py`
 
 
-## 17) Conclusion
+## 17) Core AI Technologies Implemented
 
-This system demonstrates a complete fraud decision stack: simulated data generation, ML model training, anomaly detection, policy enforcement, and explainable transaction routing. It is intentionally educational but architected in a way that mirrors real fraud platforms, where deterministic controls and probabilistic models work together to manage fraud loss and customer friction.
+This project now implements the key technology blocks described in enterprise fraud platforms, mapped directly to code in this system.
+
+### 17.1 Real-time transaction monitoring and instant scoring
+
+- `monitor_transaction_realtime()` wraps scoring and returns `processing_latency_ms`, enabling millisecond-scale monitoring metadata for each decision.
+- `predict_transaction()` computes fraud probability, anomaly score, contextual risk uplift, policy checks, and final routing in a single transaction flow.
+- Final output includes an auditable package (`decision`, `decision_source`, `reason_codes`, `alerts`) for operations use.
+
+### 17.2 Machine learning (supervised + anomaly hybrid)
+
+- Supervised branch: Logistic Regression (`train_model`) estimates `fraud_probability`.
+- Unsupervised branch: Isolation Forest (`train_anomaly_detector`) detects unusual behavior from legitimate baseline patterns.
+- Fusion: `risk_score()` combines supervised probability, anomaly signal, and amount context into a 0-100 hybrid risk score.
+
+### 17.3 Graph analytics (entity-link risk)
+
+- `graph_link_risk()` provides graph-style relationship analysis over connected entities such as:
+  - `account_id`
+  - `device_id`
+  - `beneficiary_id`
+- The function checks links to recently observed fraudulent neighborhoods and returns both:
+  - `graph_risk_score`
+  - graph-specific reason codes for explainability.
+
+### 17.4 NLP on unstructured payment instructions
+
+- `nlp_instruction_risk()` processes unstructured payment text (memo/instruction fields) and flags suspicious BEC-like phrasing.
+- Matched phrases are converted into:
+  - `nlp_risk_score`
+  - explicit reason codes (`NLP_SUSPICIOUS_PHRASE:...`) for analyst review.
+
+### 17.5 Behavioral biometrics
+
+- `behavioral_biometrics_risk()` computes a behavior anomaly signal from user-interaction deviations:
+  - typing cadence deviation (`typing_cadence_z`)
+  - mouse velocity deviation (`mouse_velocity_z`)
+  - session pattern deviation (`session_deviation_z`)
+- Output is a normalized `behavior_risk_score` plus behavior-specific reason tags.
+
+### 17.6 Human-in-the-loop learning workflow
+
+- `apply_analyst_feedback()` enables threshold adaptation after analyst outcomes:
+  - false positive feedback -> slightly raises review/decline thresholds
+  - missed fraud feedback -> slightly lowers thresholds
+- In Streamlit, this is exposed through analyst controls ("Mark as False Positive" / "Mark as Missed Fraud"), supporting continuous operational tuning.
+
+### 17.7 Decision orchestration across all signals
+
+- `_route_decision()` handles policy + model routing.
+- `_context_escalation()` adds contextual escalation so strong graph/NLP/behavior signals can move an otherwise approved transaction to `step_up`.
+- This supports a practical layered strategy: model confidence, deterministic policy, and context intelligence all contribute to final action.
+
+### 17.8 JPMC-inspired enterprise operations layer (educational simulation)
+
+To align with enterprise-bank operating patterns, the real-time monitor now produces additional operational metadata:
+
+- `enterprise_action`: `allow_transaction`, `challenge_and_review`, or `block_transaction`
+- `review_priority`: queue level (`P1`..`P4`) based on risk severity
+- `analyst_review_required`: explicit human-in-the-loop flag
+- `case_id`: generated analyst case reference for triage workflow
+- `model_lineage`: model version tag for governance-style traceability
+
+Important note: this is an **educational, JPMC-inspired architecture**, not JPMorganChase proprietary code or internal platform replication.
+
+## 18) Conclusion
+
+This system demonstrates a complete fraud decision stack: simulated data generation, ML model training, anomaly detection, policy enforcement, graph/NLP/behavior context scoring, human-in-the-loop threshold refinement, and explainable transaction routing. It is intentionally educational but architected in a way that mirrors real fraud platforms, where deterministic controls and probabilistic models work together to manage fraud loss and customer friction.

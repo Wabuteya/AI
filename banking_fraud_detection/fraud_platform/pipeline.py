@@ -7,6 +7,8 @@ Designed for clarity in a university ML / fraud-detection assignment.
 from __future__ import annotations
 
 import os
+import time
+import uuid
 from typing import Any, Dict, Tuple
 
 import numpy as np
@@ -53,6 +55,12 @@ IF_MAX_SAMPLES = 256
 ANOMALY_REVIEW_THRESHOLD = 0.72
 # Optional: very high anomaly contributes an extra decline path with supervised still below DECLINE.
 ANOMALY_DECLINE_THRESHOLD = 0.92
+GRAPH_LINK_REVIEW_THRESHOLD = 0.70
+NLP_REVIEW_THRESHOLD = 0.60
+BEHAVIOR_REVIEW_THRESHOLD = 0.70
+CONTEXT_W_GRAPH = 0.12
+CONTEXT_W_NLP = 0.10
+CONTEXT_W_BEHAVIOR = 0.10
 
 # --- Product-style routing (rules + model) ---
 # Model: auto-decline only when fraud probability is very high (real banks rarely use p>0.5 alone).
@@ -65,6 +73,7 @@ REVIEW_RISK_SCORE = 52.0
 DEFAULT_COST_FALSE_APPROVE = 30.0
 DEFAULT_COST_FALSE_DECLINE = 5.0
 DEFAULT_COST_MANUAL_REVIEW = 1.0
+MODEL_LINEAGE_VERSION = "jpmc-inspired-v1.0"
 
 # Policy examples (deterministic rules engine — common in production alongside ML).
 POLICY_NEW_ACCOUNT_DAYS = 21
@@ -88,6 +97,16 @@ SIMULATED_LOCATIONS = (
     *UGANDA_LOCATIONS,
 )
 CROSS_BORDER_LOCATIONS = frozenset({"Foreign", "Online", *UGANDA_LOCATIONS})
+NLP_BEC_PHRASES = (
+    "urgent transfer",
+    "change bank details",
+    "confidential payment",
+    "wire immediately",
+    "do not call",
+    "new beneficiary",
+    "invoice update",
+    "password reset",
+)
 
 
 def _build_behavioral_features(df: pd.DataFrame) -> pd.DataFrame:
@@ -113,6 +132,123 @@ def _build_behavioral_features(df: pd.DataFrame) -> pd.DataFrame:
     out["amount_over_prev5_mean"] = out["transaction_amount"] / (out["acct_amount_mean_prev5"] + 1.0)
     out["hour_sin"] = np.sin((2.0 * np.pi * out["transaction_time"]) / 24.0)
     out["hour_cos"] = np.cos((2.0 * np.pi * out["transaction_time"]) / 24.0)
+    return out
+
+
+def graph_link_risk(
+    transaction: Dict[str, Any],
+    recent_transactions: pd.DataFrame | None = None,
+) -> Tuple[float, list[str]]:
+    """
+    Lightweight graph-style entity linkage signal (0-1).
+
+    Approximates graph analytics by checking whether entities in the new transaction
+    link to known risky neighborhoods from recent history.
+    """
+    if recent_transactions is None or recent_transactions.empty:
+        return 0.0, []
+
+    reasons: list[str] = []
+    score = 0.0
+    df = recent_transactions.copy()
+    if "is_fraud" not in df.columns:
+        return 0.0, []
+    risky = df[df["is_fraud"].astype(int) == 1]
+    if risky.empty:
+        return 0.0, []
+
+    account_id = transaction.get("account_id")
+    device_id = transaction.get("device_id")
+    beneficiary_id = transaction.get("beneficiary_id")
+
+    if account_id is not None and "account_id" in risky.columns:
+        if account_id in set(risky["account_id"].dropna().astype(str)):
+            score += 0.45
+            reasons.append("GRAPH_LINK_RISKY_ACCOUNT")
+    if device_id is not None and "device_id" in risky.columns:
+        if str(device_id) in set(risky["device_id"].dropna().astype(str)):
+            score += 0.35
+            reasons.append("GRAPH_LINK_RISKY_DEVICE")
+    if beneficiary_id is not None and "beneficiary_id" in risky.columns:
+        if str(beneficiary_id) in set(risky["beneficiary_id"].dropna().astype(str)):
+            score += 0.30
+            reasons.append("GRAPH_LINK_RISKY_BENEFICIARY")
+
+    return float(np.clip(score, 0.0, 1.0)), reasons
+
+
+def nlp_instruction_risk(payment_instruction_text: str | None) -> Tuple[float, list[str]]:
+    """Keyword-based NLP proxy for payment-instruction and BEC-like anomalies."""
+    if not payment_instruction_text:
+        return 0.0, []
+    text = str(payment_instruction_text).strip().lower()
+    if not text:
+        return 0.0, []
+    hits = [p for p in NLP_BEC_PHRASES if p in text]
+    if not hits:
+        return 0.0, []
+    score = min(1.0, 0.25 + 0.2 * len(hits))
+    return score, [f"NLP_SUSPICIOUS_PHRASE:{h}" for h in hits]
+
+
+def behavioral_biometrics_risk(
+    behavior_profile: Dict[str, float] | None,
+) -> Tuple[float, list[str]]:
+    """
+    Behavioral biometrics anomaly score (0-1) from z-score-like deviations.
+
+    Expected keys in ``behavior_profile``:
+    - typing_cadence_z
+    - mouse_velocity_z
+    - session_deviation_z
+    """
+    if not behavior_profile:
+        return 0.0, []
+
+    t = float(abs(behavior_profile.get("typing_cadence_z", 0.0)))
+    m = float(abs(behavior_profile.get("mouse_velocity_z", 0.0)))
+    s = float(abs(behavior_profile.get("session_deviation_z", 0.0)))
+    raw = (0.4 * min(t, 5.0) + 0.35 * min(m, 5.0) + 0.25 * min(s, 5.0)) / 5.0
+    score = float(np.clip(raw, 0.0, 1.0))
+    reasons: list[str] = []
+    if t >= 2.5:
+        reasons.append("BEHAVIOR_TYPING_ANOMALY")
+    if m >= 2.5:
+        reasons.append("BEHAVIOR_POINTER_ANOMALY")
+    if s >= 2.5:
+        reasons.append("BEHAVIOR_SESSION_ANOMALY")
+    return score, reasons
+
+
+def _context_escalation(
+    routed: Dict[str, Any],
+    graph_score: float,
+    graph_reasons: list[str],
+    nlp_score: float,
+    nlp_reasons: list[str],
+    behavior_score: float,
+    behavior_reasons: list[str],
+) -> Dict[str, Any]:
+    """Escalate approved decisions to step_up when non-ML context is strongly suspicious."""
+    out = dict(routed)
+    reason_codes = list(out.get("reason_codes", []))
+    reason_codes.extend(graph_reasons + nlp_reasons + behavior_reasons)
+
+    if out.get("decision") == "approved":
+        if graph_score >= GRAPH_LINK_REVIEW_THRESHOLD:
+            out["decision"] = "step_up"
+            out["decision_source"] = "graph_analytics"
+            reason_codes.append("CONTEXT_GRAPH_ESCALATION")
+        if nlp_score >= NLP_REVIEW_THRESHOLD and out["decision"] == "approved":
+            out["decision"] = "step_up"
+            out["decision_source"] = "nlp"
+            reason_codes.append("CONTEXT_NLP_ESCALATION")
+        if behavior_score >= BEHAVIOR_REVIEW_THRESHOLD and out["decision"] == "approved":
+            out["decision"] = "step_up"
+            out["decision_source"] = "behavioral_biometrics"
+            reason_codes.append("CONTEXT_BEHAVIOR_ESCALATION")
+
+    out["reason_codes"] = reason_codes
     return out
 
 
@@ -146,6 +282,12 @@ def load_data(
     n_accounts = max(200, n // 8)
     account_ids = np.array([f"ACCT_{i:05d}" for i in range(n_accounts)])
     account_id = rng.choice(account_ids, size=n, replace=True)
+    n_devices = max(300, n // 6)
+    device_ids = np.array([f"DEV_{i:05d}" for i in range(n_devices)])
+    device_id = rng.choice(device_ids, size=n, replace=True)
+    n_benef = max(220, n // 7)
+    beneficiary_ids = np.array([f"BEN_{i:05d}" for i in range(n_benef)])
+    beneficiary_id = rng.choice(beneficiary_ids, size=n, replace=True)
     interarrival_minutes = rng.integers(1, 12, size=n)
     minute_offsets = np.cumsum(interarrival_minutes)
     event_time = pd.Timestamp("2025-01-01 00:00:00") + pd.to_timedelta(
@@ -156,6 +298,8 @@ def load_data(
         {
             "event_time": event_time,
             "account_id": account_id,
+            "device_id": device_id,
+            "beneficiary_id": beneficiary_id,
             "transaction_amount": transaction_amount,
             "transaction_time": transaction_time,
             "location": location,
@@ -626,6 +770,25 @@ def _route_decision(
     }
 
 
+def _decision_to_enterprise_action(decision: str, risk: float) -> Tuple[str, str]:
+    """
+    Map internal routing to enterprise-style actions and queue priority.
+
+    - approve: allow transaction
+    - step_up: challenge with OTP/call-back and send analyst case
+    - declined: block and open priority case
+    """
+    if decision == "declined":
+        if risk >= 85:
+            return "block_transaction", "P1"
+        return "block_transaction", "P2"
+    if decision == "step_up":
+        if risk >= 70:
+            return "challenge_and_review", "P2"
+        return "challenge_and_review", "P3"
+    return "allow_transaction", "P4"
+
+
 def _format_alerts(
     decision: str,
     risk: float,
@@ -662,6 +825,9 @@ def predict_transaction(
     anomaly_detector: Pipeline | None = None,
     anomaly_calib: Tuple[float, float] | None = None,
     routing_thresholds: Dict[str, float] | None = None,
+    recent_transactions: pd.DataFrame | None = None,
+    payment_instruction_text: str | None = None,
+    behavior_profile: Dict[str, float] | None = None,
 ) -> Dict[str, Any]:
     """
     Score one transaction: ML + policy routing + risk + user-facing alerts.
@@ -707,6 +873,16 @@ def predict_transaction(
     else:
         rscore = risk_score(fraud_probability, amount)
 
+    graph_score, graph_reasons = graph_link_risk(transaction, recent_transactions)
+    nlp_score, nlp_reasons = nlp_instruction_risk(payment_instruction_text)
+    behavior_score, behavior_reasons = behavioral_biometrics_risk(behavior_profile)
+    context_uplift = 100.0 * (
+        CONTEXT_W_GRAPH * graph_score
+        + CONTEXT_W_NLP * nlp_score
+        + CONTEXT_W_BEHAVIOR * behavior_score
+    )
+    rscore = float(np.clip(rscore + context_uplift, 0.0, 100.0))
+
     policy = evaluate_policies(transaction)
     routed = _route_decision(
         fraud_probability,
@@ -715,6 +891,15 @@ def predict_transaction(
         policy,
         anomaly_normalized=anomaly_norm,
         routing_thresholds=routing_thresholds,
+    )
+    routed = _context_escalation(
+        routed,
+        graph_score,
+        graph_reasons,
+        nlp_score,
+        nlp_reasons,
+        behavior_score,
+        behavior_reasons,
     )
 
     alerts = _format_alerts(
@@ -735,11 +920,192 @@ def predict_transaction(
         "policy_severity": policy["policy_severity"],
         "alerts": alerts,
         "hybrid_layer": hybrid_active,
+        "graph_risk_score": graph_score,
+        "nlp_risk_score": nlp_score,
+        "behavior_risk_score": behavior_score,
     }
     if hybrid_active:
         out["anomaly_score_raw"] = anomaly_raw
         out["anomaly_score_normalized"] = anomaly_norm
     return out
+
+
+def monitor_transaction_realtime(
+    model: Any,
+    transaction: Dict[str, Any],
+    feature_columns: list[str],
+    *,
+    anomaly_detector: Pipeline | None = None,
+    anomaly_calib: Tuple[float, float] | None = None,
+    routing_thresholds: Dict[str, float] | None = None,
+    recent_transactions: pd.DataFrame | None = None,
+    payment_instruction_text: str | None = None,
+    behavior_profile: Dict[str, float] | None = None,
+) -> Dict[str, Any]:
+    """Real-time scoring wrapper with latency metadata for monitoring dashboards."""
+    t0 = time.perf_counter()
+    result = predict_transaction(
+        model,
+        transaction,
+        feature_columns,
+        anomaly_detector=anomaly_detector,
+        anomaly_calib=anomaly_calib,
+        routing_thresholds=routing_thresholds,
+        recent_transactions=recent_transactions,
+        payment_instruction_text=payment_instruction_text,
+        behavior_profile=behavior_profile,
+    )
+    elapsed_ms = (time.perf_counter() - t0) * 1000.0
+    action, priority = _decision_to_enterprise_action(
+        str(result.get("decision", "approved")),
+        float(result.get("risk_score", 0.0)),
+    )
+    case_id = f"CASE-{uuid.uuid4().hex[:10].upper()}"
+    analyst_required = action in ("challenge_and_review", "block_transaction")
+    result["processing_latency_ms"] = float(round(elapsed_ms, 3))
+    result["real_time_monitoring"] = True
+    result["enterprise_action"] = action
+    result["review_priority"] = priority
+    result["analyst_review_required"] = analyst_required
+    result["case_id"] = case_id if analyst_required else ""
+    result["model_lineage"] = MODEL_LINEAGE_VERSION
+    return result
+
+
+def apply_analyst_feedback(
+    routing_thresholds: Dict[str, float],
+    *,
+    false_positive: bool = False,
+    missed_fraud: bool = False,
+    adjustment_step: float = 0.02,
+) -> Dict[str, float]:
+    """
+    Human-in-the-loop threshold adjustment.
+
+    - false_positive=True  -> slightly raise review/decline thresholds
+    - missed_fraud=True    -> slightly lower review/decline thresholds
+    """
+    review = float(routing_thresholds.get("review_probability", REVIEW_PROBABILITY))
+    decline = float(routing_thresholds.get("decline_probability", DECLINE_PROBABILITY))
+
+    if false_positive:
+        review += adjustment_step
+        decline += adjustment_step
+    if missed_fraud:
+        review -= adjustment_step
+        decline -= adjustment_step
+
+    review = float(np.clip(review, 0.10, 0.90))
+    decline = float(np.clip(decline, review + 0.05, 0.98))
+    return {"review_probability": review, "decline_probability": decline}
+
+
+def detect_account_fraud(
+    model: Any,
+    account_id: str,
+    account_transactions: pd.DataFrame,
+    feature_columns: list[str],
+    *,
+    anomaly_detector: Pipeline | None = None,
+    anomaly_calib: Tuple[float, float] | None = None,
+    routing_thresholds: Dict[str, float] | None = None,
+) -> Dict[str, Any]:
+    """
+    Score an individual bank account from its recent transactions.
+
+    Returns account-level risk indicators and the highest-risk transactions for analyst triage.
+    """
+    if account_transactions.empty:
+        return {
+            "account_id": account_id,
+            "transactions_scored": 0,
+            "account_risk_score": 0.0,
+            "account_status": "no_data",
+            "alerts": ["No transactions available for this account."],
+            "top_risky_transactions": [],
+        }
+
+    recent = account_transactions.sort_values("event_time").tail(30).copy()
+    scores: list[float] = []
+    decisions: list[str] = []
+    risky_rows: list[Dict[str, Any]] = []
+
+    for _, row in recent.iterrows():
+        tx = {
+            "transaction_amount": float(row.get("transaction_amount", 0.0)),
+            "transaction_time": int(row.get("transaction_time", 0)),
+            "location": str(row.get("location", "Online")),
+            "account_age": int(row.get("account_age", 365)),
+            "transaction_type": str(row.get("transaction_type", "Card")),
+            "previous_fraud_history": int(row.get("previous_fraud_history", 0)),
+            "account_id": str(row.get("account_id", account_id)),
+            "device_id": str(row.get("device_id", "")),
+            "beneficiary_id": str(row.get("beneficiary_id", "")),
+        }
+        result = monitor_transaction_realtime(
+            model,
+            tx,
+            feature_columns,
+            anomaly_detector=anomaly_detector,
+            anomaly_calib=anomaly_calib,
+            routing_thresholds=routing_thresholds,
+            recent_transactions=recent,
+        )
+        scores.append(float(result["risk_score"]))
+        decisions.append(str(result["decision"]))
+        risky_rows.append(
+            {
+                "event_time": str(row.get("event_time", "")),
+                "amount": float(tx["transaction_amount"]),
+                "decision": result["decision"],
+                "risk_score": float(result["risk_score"]),
+                "case_id": result.get("case_id", ""),
+                "priority": result.get("review_priority", "P4"),
+            }
+        )
+
+    mean_risk = float(np.mean(scores))
+    peak_risk = float(np.max(scores))
+    decline_count = int(np.sum(np.array(decisions) == "declined"))
+    review_count = int(np.sum(np.array(decisions) == "step_up"))
+    n_scored = max(1, len(recent))
+    review_rate = review_count / n_scored
+    decline_rate = decline_count / n_scored
+    account_risk = float(np.clip(0.6 * mean_risk + 0.4 * peak_risk, 0.0, 100.0))
+
+    # Calibrated account-level statuses:
+    # - High risk requires stronger evidence (multiple declines or very high aggregate risk).
+    # - Watchlist is driven by sustained review pressure (rate-based) or moderately high risk.
+    if decline_count >= 3 or decline_rate >= 0.15 or account_risk >= 85:
+        status = "high_risk"
+    elif review_count >= 5 or review_rate >= 0.25 or account_risk >= 65:
+        status = "watchlist"
+    else:
+        status = "normal"
+
+    top_risky = sorted(risky_rows, key=lambda x: x["risk_score"], reverse=True)[:5]
+    alerts: list[str] = []
+    if status == "high_risk":
+        alerts.append("Account flagged high risk: immediate analyst review recommended.")
+    elif status == "watchlist":
+        alerts.append("Account placed on watchlist: enhanced monitoring recommended.")
+    else:
+        alerts.append("Account behavior currently within expected risk bounds.")
+
+    return {
+        "account_id": account_id,
+        "transactions_scored": int(len(recent)),
+        "account_risk_score": round(account_risk, 2),
+        "mean_risk_score": round(mean_risk, 2),
+        "peak_risk_score": round(peak_risk, 2),
+        "declined_count": decline_count,
+        "step_up_count": review_count,
+        "review_rate": round(review_rate, 3),
+        "decline_rate": round(decline_rate, 3),
+        "account_status": status,
+        "alerts": alerts,
+        "top_risky_transactions": top_risky,
+    }
 
 
 def split_train_test(
