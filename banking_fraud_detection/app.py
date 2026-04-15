@@ -763,15 +763,15 @@ def main() -> None:
                 st.caption(f"Model lineage: {result.get('model_lineage', 'n/a')}")
                 st.pyplot(fig_risk_gauge(float(result["risk_score"])))
                 st.write(f"**Decision source:** `{result['decision_source']}`")
-            r_back2, r_fwd2 = st.columns(2)
-            with r_back2:
-                if st.button("← Back to input", use_container_width=True, key="dec_back_to_input_2"):
-                    st.session_state["decision_console_step"] = 1
-                    st.rerun()
-            with r_fwd2:
-                if st.button("Next: Actions →", use_container_width=True, key="dec_next_to_actions_2"):
-                    st.session_state["decision_console_step"] = 3
-                    st.rerun()
+                r_back2, r_fwd2 = st.columns(2)
+                with r_back2:
+                    if st.button("← Back to input", use_container_width=True, key="dec_back_to_input_2"):
+                        st.session_state["decision_console_step"] = 1
+                        st.rerun()
+                with r_fwd2:
+                    if st.button("Next: Actions →", use_container_width=True, key="dec_next_to_actions_2"):
+                        st.session_state["decision_console_step"] = 3
+                        st.rerun()
 
         elif step == 3:
             a_back, _ = st.columns([1, 2])
