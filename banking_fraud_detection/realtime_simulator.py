@@ -348,6 +348,7 @@ def run_simulation(
     n_transactions: int,
     delay_seconds: float,
     show_plot: bool = True,
+    verbose: bool = True,
 ) -> pd.DataFrame:
     """
     Live simulation loop.
@@ -358,14 +359,28 @@ def run_simulation(
     logs: list[dict[str, Any]] = []
     recent_tx: list[dict[str, Any]] = []
 
-    print("\n" + "=" * 88)
-    print("AI-Based Banking Transaction Simulator with Real-Time Fraud Detection")
-    print("=" * 88)
-    print(f"Scenario: {scenario}")
-    print(f"Account: {account_id}")
-    print(f"User profile: home={profile.home_location}, avg_amount={profile.average_transaction_amount:.0f}, "
-          f"usual_hours={profile.usual_transaction_hours}, primary_device={profile.primary_device}")
-    print("-" * 88)
+    stream_ok = True
+
+    def vprint(*args: Any, **kwargs: Any) -> None:
+        nonlocal stream_ok
+        if not verbose or not stream_ok:
+            return
+        try:
+            print(*args, **kwargs)
+        except BrokenPipeError:
+            # Happens in some UI/runtime contexts where stdout pipe is closed.
+            stream_ok = False
+
+    vprint("\n" + "=" * 88)
+    vprint("AI-Based Banking Transaction Simulator with Real-Time Fraud Detection")
+    vprint("=" * 88)
+    vprint(f"Scenario: {scenario}")
+    vprint(f"Account: {account_id}")
+    vprint(
+        f"User profile: home={profile.home_location}, avg_amount={profile.average_transaction_amount:.0f}, "
+        f"usual_hours={profile.usual_transaction_hours}, primary_device={profile.primary_device}"
+    )
+    vprint("-" * 88)
 
     for i in range(n_transactions):
         tx = generate_transaction(scenario, profile, rng, recent_tx)
@@ -376,22 +391,26 @@ def run_simulation(
             recent_tx = recent_tx[-100:]
 
         # Clean readable output
-        print(f"TX #{i+1:02d} | {result['transaction_time']} | {result['transaction_type']} | "
-              f"{result['location']} | amt={result['transaction_amount']:.2f}")
-        print(f"        ML_p={result['ml_fraud_probability']:.3f} | rules={result['rule_flags']} | "
-              f"risk={result['risk_score']:.1f} | decision={result['decision']}")
+        vprint(
+            f"TX #{i+1:02d} | {result['transaction_time']} | {result['transaction_type']} | "
+            f"{result['location']} | amt={result['transaction_amount']:.2f}"
+        )
+        vprint(
+            f"        ML_p={result['ml_fraud_probability']:.3f} | rules={result['rule_flags']} | "
+            f"risk={result['risk_score']:.1f} | decision={result['decision']}"
+        )
         for msg in result["alerts"]:
-            print(f"        {msg}")
-        print("-" * 88)
+            vprint(f"        {msg}")
+        vprint("-" * 88)
 
         if delay_seconds > 0:
             time.sleep(delay_seconds)
 
     log_df = pd.DataFrame(logs)
-    print("\nSimulation complete.")
-    print(f"Transactions analyzed: {len(log_df)}")
-    print("Decision counts:")
-    print(log_df["decision"].value_counts().to_string())
+    vprint("\nSimulation complete.")
+    vprint(f"Transactions analyzed: {len(log_df)}")
+    vprint("Decision counts:")
+    vprint(log_df["decision"].value_counts().to_string())
 
     if show_plot and not log_df.empty:
         plt.figure(figsize=(9, 4))

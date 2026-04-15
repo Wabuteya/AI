@@ -64,6 +64,48 @@ def inject_ui_styles() -> None:
             border-radius: 12px;
             padding: 0.5rem;
         }
+        /* Make tabs and buttons clearly visible */
+        [data-testid="stTabs"] [role="tablist"] {
+            gap: 0.3rem;
+            border-bottom: 1px solid #cfd6dc;
+            padding-bottom: 0.2rem;
+        }
+        [data-testid="stTabs"] [role="tab"] {
+            background: #e8ecef;
+            color: #24313a;
+            border: 1px solid #c7d0d8;
+            border-bottom: none;
+            border-top-left-radius: 8px;
+            border-top-right-radius: 8px;
+            padding: 0.45rem 0.8rem;
+            font-weight: 600;
+        }
+        [data-testid="stTabs"] [role="tab"][aria-selected="true"] {
+            background: #1f4d77;
+            color: #ffffff;
+            border-color: #1f4d77;
+        }
+        [data-testid="stTabs"] [role="tab"]:hover {
+            background: #d9e2ea;
+            color: #1d2a33;
+        }
+        .stButton > button {
+            background: #1f4d77;
+            color: #ffffff;
+            border: 1px solid #174061;
+            border-radius: 8px;
+            font-weight: 600;
+        }
+        .stButton > button:hover {
+            background: #265b8a;
+            border-color: #1f4d77;
+            color: #ffffff;
+        }
+        .stButton > button:disabled {
+            background: #d7dde2;
+            color: #6d7882;
+            border-color: #c6ced5;
+        }
         .header-card {
             background: #efefec;
             border: 1px solid #ddddda;
@@ -967,6 +1009,7 @@ def main() -> None:
                     n_transactions=int(sim_n),
                     delay_seconds=float(sim_delay),
                     show_plot=False,
+                    verbose=False,
                 )
             st.session_state["sim_log_df"] = sim_log
 
