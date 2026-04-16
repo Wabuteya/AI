@@ -391,7 +391,7 @@ def main() -> None:
         st.divider()
         st.markdown("### DATA & MODEL OPS")
         out_dir = st.text_input("Output folder", value="outputs")
-        n_samples = st.number_input("Simulated rows", min_value=500, max_value=50_000, value=5000, step=500)
+        n_samples = st.number_input("Transactions", min_value=500, max_value=50_000, value=5000, step=500)
         seed = st.number_input("Random seed", min_value=0, value=42, step=1)
         if st.button("Initialize & train models", type="primary", use_container_width=True):
             with st.spinner("Training…"):
