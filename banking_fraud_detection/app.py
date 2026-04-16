@@ -16,6 +16,7 @@ APP_TAGLINE = (
 
 import os
 from io import BytesIO
+from typing import Any
 
 os.environ.setdefault("MPLBACKEND", "Agg")
 
@@ -312,6 +313,25 @@ def risk_band_decision(risk_score: float, review_cutoff: float, block_cutoff: fl
     return "Blocked", "🚫 Transaction blocked due to high risk"
 
 
+def explain_decision_for_user(result: dict[str, Any], band_status: str) -> str:
+    """Plain-language explanation for non-technical users."""
+    decision = str(result.get("decision", "approved")).lower()
+    risk = float(result.get("risk_score", 0.0))
+    if decision == "declined" or band_status == "Blocked":
+        return (
+            f"This transaction was blocked because the risk score is high ({risk:.1f}/100) "
+            "and fraud indicators were detected."
+        )
+    if decision == "step_up" or band_status == "Flagged":
+        return (
+            f"This transaction was flagged for review ({risk:.1f}/100). "
+            "The system needs extra verification before approval."
+        )
+    return (
+        f"This transaction looks safe ({risk:.1f}/100) and can proceed normally."
+    )
+
+
 def run_training(n_samples: int, random_state: int, out_dir: str) -> None:
     """Fit models and store artifacts in session_state."""
     out_dir = ensure_output_dir(out_dir)
@@ -536,6 +556,15 @@ def main() -> None:
     k2.metric("Fraud rate", f"{df['is_fraud'].mean():.1%}", "+2.1% vs baseline")
     k3.metric("LR recall", f"{lr_m['recall']:.3f}", "+0.05 vs last run")
     k4.metric("Decline threshold", f"{st.session_state['routing_thresholds']['decline_probability']:.2f}", "cost-calibrated")
+    with st.expander("How to use this dashboard (simple guide)"):
+        st.write("1. **Decisioning console**: enter transaction details and click risk check.")
+        st.write("2. **Risk & decision**: view risk score and the system's recommendation.")
+        st.write("3. **Actions & alerts**: block/unblock account and review alerts.")
+        st.write("4. **Account monitoring**: check one account's recent behavior.")
+        st.write("5. **Live simulation**: run realistic continuous transaction scenarios.")
+        st.caption(
+            "Terms: Approve = safe, Flag = needs review, Block = high risk and stopped."
+        )
 
     tab_overview, tab_scoring, tab_accounts, tab_live, tab_data = st.tabs(
         [
@@ -791,11 +820,13 @@ def main() -> None:
                 dcol4.metric("Hybrid risk", f"{result['risk_score']:.2f}")
                 st.write(f"**Rubric status:** `{band_status}`")
                 st.write(band_alert)
+                st.info(explain_decision_for_user(result, band_status))
                 cctx1, cctx2, cctx3 = st.columns(3)
                 cctx1.metric("Graph risk", f"{result.get('graph_risk_score', 0.0):.3f}")
                 cctx2.metric("NLP risk", f"{result.get('nlp_risk_score', 0.0):.3f}")
                 cctx3.metric("Behavior risk", f"{result.get('behavior_risk_score', 0.0):.3f}")
                 st.caption(f"Processing latency: {result.get('processing_latency_ms', 0.0):.2f} ms")
+                st.caption("Risk signals above 0.7 are usually considered strong warnings.")
                 ecol1, ecol2, ecol3 = st.columns(3)
                 ecol1.metric("Enterprise action", result.get("enterprise_action", "allow_transaction"))
                 ecol2.metric("Review priority", result.get("review_priority", "P4"))
@@ -886,6 +917,9 @@ def main() -> None:
             "<p class='section-note'>Detect fraud risk at the individual account level using recent transactions.</p>",
             unsafe_allow_html=True,
         )
+        st.caption(
+            "Status guide: normal = low concern, watchlist = monitor closely, high_risk = immediate action."
+        )
         account_ids = sorted(df["account_id"].dropna().astype(str).unique().tolist())
         default_idx = 0 if account_ids else None
         selected_account = st.selectbox(
@@ -933,6 +967,12 @@ def main() -> None:
             r2.metric("Decline rate", f"{100.0 * float(ar.get('decline_rate', 0.0)):.1f}%")
             for msg in ar.get("alerts", []):
                 st.info(msg)
+            if ar["account_status"] == "normal":
+                st.success("Account is currently operating within expected behavior.")
+            elif ar["account_status"] == "watchlist":
+                st.warning("Account needs enhanced monitoring due to repeated suspicious patterns.")
+            else:
+                st.error("Account is high risk and should be prioritized for intervention.")
             ctrl1, ctrl2 = st.columns(2)
             if ar["account_status"] == "high_risk":
                 if ctrl1.button("🚫 Block selected account", type="primary"):
@@ -987,6 +1027,9 @@ def main() -> None:
             "Transaction -> Validation -> Fraud Detection -> Risk -> Decision -> Alert -> Log.</p>",
             unsafe_allow_html=True,
         )
+        st.caption(
+            "Tip: start with 'normal' scenario, then try 'suspicious' and 'fraud_attack' to compare outcomes."
+        )
         ls1, ls2, ls3, ls4 = st.columns(4)
         with ls1:
             sim_scenario = st.selectbox(
@@ -1021,6 +1064,46 @@ def main() -> None:
             m2.metric("Approved", int((sim_df["decision"] == "APPROVE").sum()))
             m3.metric("Flagged", int((sim_df["decision"] == "FLAG FOR REVIEW").sum()))
             m4.metric("Blocked", int((sim_df["decision"] == "BLOCK TRANSACTION").sum()))
+
+            # Live alerts summary and feed
+            st.subheader("Live alerts")
+            flagged_df = sim_df[sim_df["decision"] == "FLAG FOR REVIEW"].copy()
+            blocked_df = sim_df[sim_df["decision"] == "BLOCK TRANSACTION"].copy()
+            la1, la2, la3 = st.columns(3)
+            la1.metric("Alert events", int(len(flagged_df) + len(blocked_df)))
+            la2.metric("Warning alerts", int(len(flagged_df)))
+            la3.metric("Critical alerts", int(len(blocked_df)))
+
+            alert_rows: list[dict[str, Any]] = []
+            for _, row in sim_df.iterrows():
+                alerts = row.get("alerts", [])
+                if not isinstance(alerts, list):
+                    continue
+                for msg in alerts:
+                    severity = "critical" if "🚫" in str(msg) else ("warning" if "⚠️" in str(msg) else "info")
+                    alert_rows.append(
+                        {
+                            "timestamp": str(row["timestamp"]),
+                            "account_id": row["account_id"],
+                            "decision": row["decision"],
+                            "risk_score": float(row["risk_score"]),
+                            "alert_message": str(msg),
+                            "severity": severity,
+                        }
+                    )
+            alert_feed = pd.DataFrame(alert_rows)
+            if not alert_feed.empty:
+                severity_order = {"critical": 0, "warning": 1, "info": 2}
+                alert_feed["severity_rank"] = alert_feed["severity"].map(severity_order).fillna(3)
+                alert_feed = (
+                    alert_feed.sort_values(["severity_rank", "timestamp"], ascending=[True, False])
+                    .drop(columns=["severity_rank"])
+                    .head(20)
+                )
+                st.caption("Latest alert feed (critical first)")
+                st.dataframe(alert_feed, use_container_width=True)
+            else:
+                st.info("No alerts generated in this simulation run.")
 
             st.subheader("Risk trend")
             trend = sim_df[["timestamp", "risk_score"]].copy()
