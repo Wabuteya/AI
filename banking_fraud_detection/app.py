@@ -332,6 +332,24 @@ def explain_decision_for_user(result: dict[str, Any], band_status: str) -> str:
     )
 
 
+def transaction_fingerprint(tx: dict[str, Any]) -> str:
+    """
+    Stable key for re-identifying "same transaction" submissions in this demo.
+    """
+    parts = [
+        f"amount={float(tx.get('transaction_amount', 0.0)):.2f}",
+        f"hour={int(tx.get('transaction_time', 0))}",
+        f"loc={str(tx.get('location', ''))}",
+        f"acct_age={int(tx.get('account_age', 0))}",
+        f"type={str(tx.get('transaction_type', ''))}",
+        f"prev_fraud={int(tx.get('previous_fraud_history', 0))}",
+        f"account_id={str(tx.get('account_id', ''))}",
+        f"device_id={str(tx.get('device_id', ''))}",
+        f"beneficiary_id={str(tx.get('beneficiary_id', ''))}",
+    ]
+    return "|".join(parts)
+
+
 def run_training(n_samples: int, random_state: int, out_dir: str) -> None:
     """Fit models and store artifacts in session_state."""
     out_dir = ensure_output_dir(out_dir)
@@ -471,6 +489,8 @@ def main() -> None:
     X_test: pd.DataFrame = st.session_state["X_test"]
     if "blocked_accounts" not in st.session_state:
         st.session_state["blocked_accounts"] = set()
+    if "transaction_feedback_marks" not in st.session_state:
+        st.session_state["transaction_feedback_marks"] = {}
 
     rt = st.session_state["routing_thresholds"]
     sample = X_test.iloc[:3].copy()
@@ -720,6 +740,7 @@ def main() -> None:
                 "device_id": device_id.strip(),
                 "beneficiary_id": beneficiary_id.strip(),
             }
+            tx_fp = transaction_fingerprint(tx)
             st.session_state["last_tx_input"] = tx
             account_is_blocked = tx["account_id"] in st.session_state["blocked_accounts"]
             if account_is_blocked:
@@ -769,6 +790,14 @@ def main() -> None:
                         payment_instruction_text=payment_instruction_text,
                         behavior_profile=behavior_profile,
                     )
+                marked_feedback = st.session_state["transaction_feedback_marks"].get(tx_fp)
+                if marked_feedback:
+                    result["feedback_mark"] = marked_feedback
+                    result.setdefault("reason_codes", []).append(f"PREVIOUSLY_MARKED_{marked_feedback.upper()}")
+                    result.setdefault("alerts", []).append(
+                        f"📝 Previously marked by analyst as: {marked_feedback.replace('_', ' ').title()}."
+                    )
+                st.session_state["last_tx_fingerprint"] = tx_fp
                 st.session_state["last_result"] = result
                 st.session_state["decision_console_step"] = 2
                 st.rerun()
@@ -821,6 +850,11 @@ def main() -> None:
                 st.write(f"**Rubric status:** `{band_status}`")
                 st.write(band_alert)
                 st.info(explain_decision_for_user(result, band_status))
+                if result.get("feedback_mark"):
+                    st.warning(
+                        "Analyst feedback memory: this same transaction was previously marked as "
+                        f"**{str(result['feedback_mark']).replace('_', ' ').title()}**."
+                    )
                 cctx1, cctx2, cctx3 = st.columns(3)
                 cctx1.metric("Graph risk", f"{result.get('graph_risk_score', 0.0):.3f}")
                 cctx2.metric("NLP risk", f"{result.get('nlp_risk_score', 0.0):.3f}")
@@ -887,11 +921,17 @@ def main() -> None:
                     st.session_state["routing_thresholds"] = apply_analyst_feedback(
                         st.session_state["routing_thresholds"], false_positive=True
                     )
+                    last_fp = st.session_state.get("last_tx_fingerprint")
+                    if last_fp:
+                        st.session_state["transaction_feedback_marks"][last_fp] = "false_positive"
                     st.success("Thresholds adjusted to reduce false positives.")
                 if fb2.button("Mark as Missed Fraud", key="missed_fraud_action_tab"):
                     st.session_state["routing_thresholds"] = apply_analyst_feedback(
                         st.session_state["routing_thresholds"], missed_fraud=True
                     )
+                    last_fp = st.session_state.get("last_tx_fingerprint")
+                    if last_fp:
+                        st.session_state["transaction_feedback_marks"][last_fp] = "false_negative"
                     st.success("Thresholds adjusted to increase fraud catch rate.")
                 result_df = pd.DataFrame([result])
                 st.download_button(
